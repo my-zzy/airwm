@@ -79,17 +79,24 @@ def target_at(t, phase, hover, device):
 def collect(args):
     from airwm.diagnostics import GpuMonitor
 
+    plans = None
+    if getattr(args, "command", None) == "branch-collect":
+        from airwm.branching import prepare_branches
+
+        plans = prepare_branches(args)
+        args.episodes = len(plans)
+        args.seconds = args.horizon / FlightConfig().camera_hz
     root = Path(args.output)
-    root.mkdir(parents=True, exist_ok=True)
+    root.mkdir(parents=True, exist_ok=plans is None)
     monitor = GpuMonitor(int(args.device.split(":")[-1]) if ":" in args.device else 0)
     monitor.start()
     try:
-        _collect(args, monitor)
+        _collect(args, monitor, plans)
     finally:
         monitor.stop(root / f"gpu_memory_s{args.seed:04d}.json")
 
 
-def _collect(args, monitor):
+def _collect(args, monitor, plans=None):
     # Delay all Isaac imports: training and data tools never load Kit.
     import isaaclab.sim as sim_utils
     from isaaclab.app import launch_simulation
@@ -186,7 +193,10 @@ def _collect(args, monitor):
         started = time.perf_counter()
         reports = []
         for episode in range(args.episodes):
-            phase = float(rng.uniform(-math.pi, math.pi))
+            plan = plans[episode] if plans is not None else None
+            phase = (
+                plan["metadata"]["source_phase"] if plan else float(rng.uniform(-math.pi, math.pi))
+            )
             pos, yaw = target_at(0, phase, args.trajectory == "hover", sim.device)
             pose = torch.cat(
                 (
@@ -197,16 +207,21 @@ def _collect(args, monitor):
                 ),
                 -1,
             )
+            velocity = torch.zeros(1, 6, device=sim.device)
+            if plan:
+                initial = torch.as_tensor(plan["initial_state"], device=sim.device)[None]
+                pose, velocity = initial[:, :7], initial[:, 7:]
+                replay_actions = torch.as_tensor(plan["actions"], device=sim.device)
             drone.write_root_pose_to_sim_index(root_pose=pose)
-            drone.write_root_velocity_to_sim_index(
-                root_velocity=torch.zeros(1, 6, device=sim.device)
-            )
+            drone.write_root_velocity_to_sim_index(root_velocity=velocity)
             drone.reset()
             # Publish teleported physics transforms before resetting camera views.
             sim.forward()
             camera.reset()
             contacts.reset()
             motors.reset()
+            if plan:
+                motors.speed.copy_(torch.as_tensor(plan["motor_speed"], device=sim.device)[None])
             drone.update(0.0)
             for _ in range(6):
                 sim.render()
@@ -221,7 +236,12 @@ def _collect(args, monitor):
                 state[:, 10:13],
                 1 / cfg.physics_hz,
             )
-            filename = root / f"flight_s{args.seed:04d}_{episode:04d}.h5"
+            if plan:
+                # This is the last pre-branch IMU sample from the common history.
+                imu = torch.as_tensor(plan["initial_imu"], device=sim.device)[None]
+            filename = root / (
+                plan["filename"] if plan else f"flight_s{args.seed:04d}_{episode:04d}.h5"
+            )
             metadata = {
                 "seed": args.seed,
                 "episode": episode,
@@ -239,6 +259,8 @@ def _collect(args, monitor):
                 .cpu()
                 .tolist(),
             }
+            if plan:
+                metadata.update(plan["metadata"])
             frame_errors = []
             collision_count = 0
             valid_fractions = []
@@ -302,16 +324,21 @@ def _collect(args, monitor):
                     collided = False
                     for control in range(cfg.controls_per_frame):
                         t = frame / cfg.camera_hz + control / cfg.control_hz
-                        target, yaw = target_at(t, phase, args.trajectory == "hover", sim.device)
-                        command = controller(
-                            motors,
-                            state[:, :3],
-                            state[:, 3:7],
-                            state[:, 7:10],
-                            state[:, 10:13],
-                            target,
-                            yaw,
-                        )
+                        if plan:
+                            command = replay_actions[frame, control][None]
+                        else:
+                            target, yaw = target_at(
+                                t, phase, args.trajectory == "hover", sim.device
+                            )
+                            command = controller(
+                                motors,
+                                state[:, :3],
+                                state[:, 3:7],
+                                state[:, 7:10],
+                                state[:, 10:13],
+                                target,
+                                yaw,
+                            )
                         actions.append(command[0].cpu().numpy().copy())
                         for _ in range(cfg.physics_per_control):
                             old_velocity = state[:, 7:10].clone()
@@ -344,9 +371,17 @@ def _collect(args, monitor):
                         snapshot((frame + 1) / cfg.camera_hz, collided),
                         np.stack(actions),
                     )
-                    target_at_frame, _ = target_at(
-                        (frame + 1) / cfg.camera_hz, phase, args.trajectory == "hover", sim.device
-                    )
+                    if plan:
+                        target_at_frame = torch.as_tensor(
+                            plan["reference_states"][frame + 1, :3], device=sim.device
+                        )[None]
+                    else:
+                        target_at_frame, _ = target_at(
+                            (frame + 1) / cfg.camera_hz,
+                            phase,
+                            args.trajectory == "hover",
+                            sim.device,
+                        )
                     frame_errors.append(float((state[:, :3] - target_at_frame).norm()))
                     if collided:
                         collision_count += 1
@@ -366,6 +401,11 @@ def _collect(args, monitor):
                 "initial_center_depth_m": center_depths[0],
                 "maximum_camera_position_error_m": max(camera_position_errors),
             }
+            if plan:
+                report["variant"] = plan["metadata"]["variant"]
+                report["source"] = plan["metadata"]["source"]
+                report["mean_reference_deviation_m"] = report.pop("mean_tracking_error_m")
+                report["max_reference_deviation_m"] = report.pop("max_tracking_error_m")
             reports.append(report)
             print(json.dumps(report), flush=True)
         summary = {

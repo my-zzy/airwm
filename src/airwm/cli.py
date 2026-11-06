@@ -28,6 +28,31 @@ def main(argv=None):
     collect.add_argument("--trajectory", choices=["hover", "sweep"], default="sweep")
     collect.add_argument("--device", default="cuda:0")
     collect.add_argument("--gui", action="store_true")
+    branch = commands.add_parser(
+        "branch-collect", help="Replay matched motor-command interventions"
+    )
+    branch.add_argument("--source", required=True, help="Folder of complete reference flights")
+    branch.add_argument("--output", required=True, help="Fresh folder for evaluation-only branches")
+    branch.add_argument("--sources", type=int, default=8)
+    branch.add_argument("--start-frame", type=int, default=160)
+    branch.add_argument("--horizon", type=int, default=40)
+    branch.add_argument("--seed", type=int, default=101)
+    branch.add_argument("--device", default="cuda:0")
+    branch.add_argument("--gui", action="store_true")
+    from airwm.branching import INTERVENTIONS
+
+    branch.add_argument(
+        "--branches", nargs="+", choices=list(INTERVENTIONS), default=list(INTERVENTIONS)
+    )
+    branch.set_defaults(trajectory="replay")
+    branch_eval = commands.add_parser(
+        "branch-evaluate", help="Evaluate paired simulated action responses"
+    )
+    branch_eval.add_argument("--data", required=True)
+    branch_eval.add_argument("--checkpoint", required=True)
+    branch_eval.add_argument("--output", required=True)
+    branch_eval.add_argument("--context", type=int, default=20)
+    branch_eval.add_argument("--device", default="cuda:0")
     train = commands.add_parser("train", help="Train the RSSM from complete flight files")
     train.add_argument("--data", default="data/pilot")
     train.add_argument("--run", default="runs/baseline")
@@ -61,7 +86,13 @@ def main(argv=None):
 
         profile(args)
         return 0
-    if args.command == "collect":
+    if args.command in ("collect", "branch-collect"):
+        if args.command == "branch-collect" and (
+            min(args.sources, args.horizon) < 1
+            or args.start_frame < 19
+            or len(set(args.branches)) != len(args.branches)
+        ):
+            parser.error("Use positive sources/horizon, start-frame >= 19, and unique branches")
         from importlib.metadata import version
 
         if version("isaaclab").split("+")[0] != "3.0.0":
@@ -69,6 +100,12 @@ def main(argv=None):
         from airwm.simulation import collect
 
         collect(args)
+    elif args.command == "branch-evaluate":
+        if args.context < 1:
+            parser.error("Context must be positive")
+        from airwm.branch_evaluate import evaluate_branches
+
+        evaluate_branches(args)
     elif args.command == "train":
         if args.eval_every < 1:
             parser.error("--eval-every must be positive")

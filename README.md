@@ -4,7 +4,7 @@ A simulation research project for a drone that explores an indoor room and learn
 
 The goal is to learn visible room geometry, appearance, and flight dynamics from RGB-D, IMU measurements, and motor-command histories, then use those predictions to guide further exploration.
 
-**Status:** the first pilot experiment is complete. Collected and audited 100 flights, trained the RSSM for 10,000 steps, and evaluated the selected checkpoint on held-out flights. At a two-second prediction horizon, test RGB MSE is 93.9% lower and depth RMSE is 79.9% lower than repeating the last frame. These results cover gentle scripted flights in one room; autonomous exploration and persistent room memory remain future work. All 15 CPU tests pass.
+**Status:** the first pilot and the paired action-response experiment are complete. The RSSM forecasts familiar sweeps well (93.9% lower RGB MSE and 79.9% lower depth RMSE than persistence at two seconds), but it almost ignores tested changes in motor commands. It is **not ready to guide autonomous exploration**. Next, broaden maneuvers and improve action-response learning before retraining. All 20 CPU tests pass.
 
 See [SIMULATION_PLAN.md](SIMULATION_PLAN.md) for the detailed experiment design, evaluation protocol, and references.
 
@@ -156,9 +156,48 @@ Test evaluation used 100 windows, ten per test flight, with one second of sensor
 
 At two seconds, nominal physics has 0.000438 m mean position error and is substantially more accurate than learned motion. It receives the exact last simulator state and known physical parameters; the RSSM receives RGB-D, IMU, and actions. Learned relative pose is anchored at the last reference pose only when computing evaluation errors. Predictions respond to changed motor commands, but this sensitivity test does **not** establish that counterfactual predictions are correct.
 
-The drone visited a central 2.2 × 1.8 m region at altitudes 1.1–1.5 m, with speeds up to 0.389 m/s and all heading bins represented. Training and test flights share the same room and scripted trajectory family. The results establish prediction on this distribution, not a complete room map or reliable dynamics under unfamiliar actions. Next, broaden maneuvers and test predictions against simulator branches with changed commands, plus motion-head ablation and revisit checks, before learned exploration.
+The drone visited a central 2.2 × 1.8 m region at altitudes 1.1–1.5 m, with speeds up to 0.389 m/s and all heading bins represented. Training and test flights share the same room and scripted trajectory family. The results establish prediction on this distribution, not a complete room map or reliable dynamics under unfamiliar actions. The action-response experiment below tests that limitation directly; motion-head ablation and revisit checks remain outstanding.
 
 Local artifacts: [prediction preview](runs/baseline-evaluation/prediction.png), [training curves](runs/baseline/training-curves.png), [baseline comparison](runs/baseline-evaluation/comparison.png), [dataset coverage](runs/pilot100/audit/coverage.png), [experiment summary](runs/pilot100/experiment-summary.json), [test metrics](runs/baseline-evaluation/metrics.json), and [best checkpoint](runs/baseline/best.pt). The [audit manifest](runs/pilot100/audit/audit.json) includes each flight's SHA-256; the source snapshot and hashes are under `runs/pilot100/source` and `runs/pilot100/source-manifest.json`. Generated data, checkpoints, and plots remain local under ignored `data/` and `runs/` directories.
+
+## Action-response test (2026-11-06)
+
+Collected eight new 12-second reference flights with seed 101, separate from all pilot splits. At frame 160 (8 s), restored body pose, velocity, and rotor lag state, then collected **12 branches per history / 96 branches total**: unchanged control, an identical repeat, and ten positive/negative collective, yaw, pitch, and roll interventions. Each intervention changes normalized rotor-speed commands for 0.25 seconds, then resumes the identical recorded commands without controller feedback. The fixed step-9,800 checkpoint sees the same 20-frame RGB-D/IMU/action history for every branch and predicts the following 40 frames.
+
+The command offsets are ±0.005 and ±0.020 for collective speed, ±0.005 with alternating rotor signs for yaw, and ±0.0005 with front/rear or left/right signs for pitch and roll. These offsets are normalized rotor speed, not thrust in newtons.
+
+Unchanged-action replay and repeat runs reproduced all reference states exactly; repeat depth was also identical. Mean repeated-render RGB MSE was 0.000108, which supplies a rendering-variation reference. All 96 branches completed without collisions or censored horizons. Collection took 160 seconds after startup and peaked at 6.23 GiB device-wide GPU memory. These are comparisons across **eight shared histories**, not 96 independent samples.
+
+The model severely underpredicts the physical effects of changing actions. Example mean changes from the unchanged control at two seconds:
+
+| Intervention | Simulator change | Predicted change |
+|---|---:|---:|
+| Collective +0.020 | 0.233 m position | 0.000402 m position |
+| Pitch-positive pulse | 0.534 m position | about 0.000001 m position |
+| Roll-positive pulse | 0.534 m position | about 0.000001 m position |
+| Yaw-positive pulse | 0.0904 rad rotation | 0.0000026 rad rotation |
+
+Using the changed commands gives almost the same predictions as supplying the unchanged commands. Pitch and roll pulses remain within the pilot's per-motor minimum/maximum ranges; this failure is not confined to values outside those bounds. Marginal bounds do not establish that the joint action sequences were represented in training. The findings are consistent with learning familiar trajectory patterns while making very weak use of actions; the exact causes require further experiments.
+
+Reproduce in fresh output directories using the existing environment:
+
+```bash
+OMNI_KIT_ACCEPT_EULA=YES bash setup/run.sh airwm collect \
+  --output data/action_branches01/reference --episodes 8 --seconds 12 --seed 101
+OMNI_KIT_ACCEPT_EULA=YES bash setup/run.sh airwm branch-collect \
+  --source data/action_branches01/reference --output data/action_branches01/branches --sources 8
+bash setup/run.sh airwm branch-evaluate \
+  --data data/action_branches01/branches --checkpoint runs/baseline/best.pt \
+  --output runs/action_branches01/evaluation-verified
+bash setup/run.sh python scripts/summarize_branches.py \
+  --evaluation runs/action_branches01/evaluation-verified
+```
+
+`branch-collect` requires a fresh output folder. `branch-evaluate` verifies source hashes, initial states, reconstructed motor-state metadata, exact declared action sequences, and control/repeat restoration before reporting results. It retains collisions and missing horizons explicitly. Ground-truth state is excluded from model inputs; it anchors pose evaluation and initializes the nominal-physics comparator. Branch files are evaluation data and share histories: do not treat them as independent training examples or split related branches across train/test.
+
+Artifacts: [action effects](runs/action_branches01/evaluation-verified/action-effects.png), [response curves](runs/action_branches01/evaluation-verified/response-curves.png), [pitch prediction preview](runs/action_branches01/evaluation-verified/pitch_positive.png), [summary](runs/action_branches01/evaluation-verified/summary.json), [full metrics](runs/action_branches01/evaluation-verified/metrics.json), and [experiment manifest](runs/action_branches01/experiment-manifest.json). The manifest records source, dataset, checkpoint, and environment-lock hashes; the source snapshot is under `runs/action_branches01/source`. The original pilot checkpoint and results are preserved. CPU tests cover intervention timing/direction, rotor-state restoration, paired-effect scoring, invalid restores, and evaluation plumbing. A fresh two-second hover also passed after the collector changes.
+
+Next, collect randomized maneuvers that excite the independent control axes, investigate motor-input normalization and stronger multi-step motion/action objectives, then retrain. Keep this branch bank as a fixed diagnostic; reserve new histories for the final evaluation after tuning. Motion-head ablation and revisit tests remain part of Step 4. Plan2Explore follows only once action-response predictions become reliable.
 
 ## Roadmap
 
@@ -169,7 +208,9 @@ Local artifacts: [prediction preview](runs/baseline-evaluation/prediction.png), 
 - [x] Run a short training/checkpoint/held-out evaluation smoke test.
 - [x] Collect and inspect the pilot flight dataset.
 - [x] Train and evaluate the RSSM prediction baseline.
-- [ ] Broaden maneuvers; validate changed-action predictions, motion-head ablation, and revisits.
+- [x] Implement paired simulator branches and evaluate changed-action predictions (current model fails this check).
+- [ ] Broaden maneuvers and improve action-response learning; retrain and test on new histories.
+- [ ] Run motion-head ablation and revisit evaluation.
 - [ ] Add learned exploration and compare it with scripted sweeps at equal flight time.
 - [ ] Add persistent spatial memory and evaluate revisits.
 - [ ] Investigate adaptation to new rooms and changed drone parameters.

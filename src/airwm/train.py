@@ -39,7 +39,8 @@ def train(args):
         dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=0,
+        num_workers=args.workers,
+        persistent_workers=args.workers > 0,
         pin_memory=device.type == "cuda",
     )
     val_loader = DataLoader(validation, batch_size=args.batch_size, shuffle=False, num_workers=0)
@@ -93,14 +94,15 @@ def train(args):
             }
             if step % args.eval_every == 0 or step == args.steps:
                 model.eval()
-                values = []
+                validation_total, validation_sequences = 0.0, 0
                 with torch.no_grad(), autocast():
-                    for i, vbatch in enumerate(val_loader):
+                    for vbatch in val_loader:
                         vloss, _ = model.loss(to_device(vbatch, device))
-                        values.append(float(vloss))
-                        if i >= 7:
-                            break
-                record["validation_loss"] = float(np.mean(values))
+                        count = vbatch["image"].shape[0]
+                        validation_total += float(vloss) * count
+                        validation_sequences += count
+                record["validation_loss"] = validation_total / validation_sequences
+                record["validation_sequences"] = validation_sequences
                 checkpoint = {
                     "model": model.state_dict(),
                     "model_config": config.to_dict(),
@@ -113,6 +115,7 @@ def train(args):
                 if record["validation_loss"] < best:
                     best = record["validation_loss"]
                     torch.save(checkpoint, run / "best.pt")
+            record["elapsed_seconds"] = time.perf_counter() - started
             log.write(json.dumps(record) + "\n")
             log.flush()
             if step == 1 or step % 10 == 0 or step == args.steps:

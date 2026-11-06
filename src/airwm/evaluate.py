@@ -16,6 +16,50 @@ from airwm.model import ModelConfig, WorldModel
 from airwm.train import to_device
 
 
+def evaluation_indices(windows, count):
+    """Round-robin flights with evenly spaced, nonoverlapping windows in each.
+
+    Allocate the window budget across flights before choosing their offsets so
+    even a small evaluation covers different flights and different flight times.
+    """
+    groups = {}
+    for index, (episode, _) in enumerate(windows):
+        groups.setdefault(episode, []).append(index)
+    budgets = dict.fromkeys(groups, 0)
+    remaining = min(count, len(windows))
+    while remaining:
+        for episode, indices in groups.items():
+            if budgets[episode] < len(indices) and remaining:
+                budgets[episode] += 1
+                remaining -= 1
+    selected = []
+    for episode, indices in groups.items():
+        n = budgets[episode]
+        # Midpoints of equally sized bins include late flight times even at n=1.
+        selected.append([indices[int((j + 0.5) * len(indices) / n)] for j in range(n)])
+    return [
+        row[j] for j in range(max(budgets.values(), default=0)) for row in selected if j < len(row)
+    ]
+
+
+def summarize_metrics(metrics):
+    summaries = {}
+    for horizon in sorted({m["horizon_seconds"] for m in metrics}):
+        records = [m for m in metrics if m["horizon_seconds"] == horizon]
+        numeric = [
+            k
+            for k, v in records[0].items()
+            if isinstance(v, float) and k not in ("horizon_seconds", "start_time_seconds")
+        ]
+        summaries[str(horizon)] = {
+            "windows": len(records),
+            "flights": len({m["flight"] for m in records}),
+            "mean": {k: float(np.mean([m[k] for m in records])) for k in numeric},
+            "std": {k: float(np.std([m[k] for m in records])) for k in numeric},
+        }
+    return summaries
+
+
 def save_preview(path, truth, predicted, persistence, camera_hz):
     # RGB rows followed by metric-depth grayscale rows; columns span the rollout.
     indices = np.linspace(0, len(truth) - 1, min(8, len(truth)), dtype=int)
@@ -58,8 +102,9 @@ def evaluate(args):
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=False)
     metrics = []
-    for i in range(min(args.windows, len(dataset))):
-        batch = to_device({k: v[None] for k, v in dataset[i].items()}, device)
+    selected = evaluation_indices(dataset.windows, args.windows)
+    for i, dataset_index in enumerate(selected):
+        batch = to_device({k: v[None] for k, v in dataset[dataset_index].items()}, device)
         c = args.context
         prediction, motion = model.predict(
             batch["image"][:, :c],
@@ -80,7 +125,7 @@ def evaluate(args):
         )
         # Read privileged reference state separately. Neither prediction above
         # receives this state; it anchors evaluation and initializes the baseline.
-        episode, start = dataset.windows[i]
+        episode, start = dataset.windows[dataset_index]
         with h5py.File(dataset.paths[episode]) as f:
             cfg = FlightConfig(**json.loads(f.attrs["config"]))
             states = torch.from_numpy(f["state"][start : start + c + args.horizon]).float()
@@ -105,6 +150,10 @@ def evaluate(args):
             valid = mask[:, t]
             record = {
                 "window": i,
+                "dataset_index": dataset_index,
+                "flight": dataset.paths[episode],
+                "start_frame": start,
+                "start_time_seconds": start / hz,
                 "horizon_seconds": seconds,
                 "rgb_mse": float((prediction[:, t, :3] - truth[:, t, :3]).square().mean()),
                 "persistence_rgb_mse": float((persist[:, t, :3] - truth[:, t, :3]).square().mean()),
@@ -174,9 +223,12 @@ def evaluate(args):
         "checkpoint": str(Path(args.checkpoint).resolve()),
         "context_frames": args.context,
         "future_frames": args.horizon,
-        "windows": min(args.windows, len(dataset)),
+        "windows": len(selected),
+        "flights_evaluated": len({dataset.windows[i][0] for i in selected}),
+        "window_sampling": "balanced across flights, evenly spaced within each flight",
         "note": "Learned pose deltas are integrated from the last observed ground-truth pose for evaluation only. The nominal baseline receives the last ground-truth state, recorded past/future commands, and nominal physical parameters. It omits contacts and PhysX solver details. Ground-truth state is never an RSSM input.",
         "metrics": metrics,
+        "summary_by_horizon": summarize_metrics(metrics),
     }
     (out / "metrics.json").write_text(json.dumps(report, indent=2) + "\n")
     print(f"Saved evaluation to {out}", flush=True)

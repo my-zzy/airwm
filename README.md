@@ -4,7 +4,7 @@ A simulation research project for a drone that explores an indoor room and learn
 
 The goal is to learn visible room geometry, appearance, and flight dynamics from RGB-D, IMU measurements, and motor-command histories, then use those predictions to guide further exploration.
 
-**Status:** the initial pipeline works end to end. The pinned simulator stack is installed in `airwm`; CUDA execution and all 13 CPU tests pass. Hover, moving-flight RGB-D/IMU collection, a 10-step RSSM training run, and held-out evaluation have been validated. Full pilot-data collection and research training remain to be done.
+**Status:** the first pilot experiment is complete. Collected and audited 100 flights, trained the RSSM for 10,000 steps, and evaluated the selected checkpoint on held-out flights. At a two-second prediction horizon, test RGB MSE is 93.9% lower and depth RMSE is 79.9% lower than repeating the last frame. These results cover gentle scripted flights in one room; autonomous exploration and persistent room memory remain future work. All 15 CPU tests pass.
 
 See [SIMULATION_PLAN.md](SIMULATION_PLAN.md) for the detailed experiment design, evaluation protocol, and references.
 
@@ -67,6 +67,9 @@ This host's shell adds a CUDA 12.8 library directory to `LD_LIBRARY_PATH`. Run c
 The following commands reproduce the validated short workflow, then start the larger experiment. Use fresh output directories when repeating collection or training:
 
 ```bash
+# Required license acknowledgement for noninteractive Isaac Sim launches.
+export OMNI_KIT_ACCEPT_EULA=YES
+
 # One drone, local room geometry, no remote scene assets. Headless by default.
 airwm collect --output data/hover --episodes 1 --seconds 5 --trajectory hover
 airwm collect --output data/pilot --episodes 3 --seconds 8 --trajectory sweep
@@ -80,13 +83,17 @@ airwm evaluate --checkpoint runs/smoke/best.pt --output runs/smoke-evaluation
 
 # Once flights and predictions are validated, collect the planned pilot dataset.
 airwm collect --output data/pilot100 --episodes 100 --seconds 45 --seed 10
-airwm train --data data/pilot100 --run runs/baseline --steps 10000 --batch-size 16
-airwm evaluate --checkpoint runs/baseline/best.pt --output runs/baseline-evaluation
+python scripts/audit_flights.py --data data/pilot100 --output runs/pilot100/audit --expected-flights 100
+airwm train --data data/pilot100 --run runs/baseline --steps 10000 --batch-size 16 --workers 4
+airwm evaluate --checkpoint runs/baseline/best.pt --output runs/baseline-evaluation --windows 100
+python scripts/summarize_pilot.py
 ```
 
-Add `--gui` to `collect` for a viewport. Collection and training are separate processes. A short training run verifies the pipeline; it does not establish useful learned predictions. Training-step count is a starting budget and must be adjusted from held-out results. Test predictions remain independent of training/validation flight splits.
+Add `--gui` to `collect` for a viewport. Collection and training are separate processes. A short training run verifies the pipeline; it does not establish useful learned predictions. Training-step count is a starting budget and must be adjusted from validation results. Test predictions remain independent of training/validation flight splits.
 
 The collector saves one HDF5 file per flight, camera intrinsics and conventions, tracking/depth diagnostics, and sampled device-wide VRAM. Physics and camera warmup occur before the episode clock starts, and every recorded camera pose is checked against the drone state. An interrupted file retains `.partial` and is excluded from training. Evaluation saves `prediction.png`, raw prediction arrays, and RGB/depth/motion errors at 0.5, 1, and 2 seconds, including a last-frame baseline and an action-change sensitivity check.
+
+The audit checks every completed flight for finite sensor values, action/timestamp alignment, quaternion norms, depth validity, and collisions, then saves a file-hash manifest, RGB preview, and flight-coverage plot. Evaluation balances its window budget across held-out flights and samples throughout each flight; each metric retains its source flight and frame offset. Pose occupancy describes the drone's path, not the fraction of room surfaces reconstructed.
 
 ## Data and implementation boundaries
 
@@ -133,6 +140,26 @@ The immediate learning milestone is:
 
 Compare against visual persistence and nominal physics, and change future commands from the same starting state to verify that the model responds to actions. The pilot dataset is approximately 100 flights of 30–60 seconds, with further collection guided by validation results.
 
+## Pilot results (2026-11-06)
+
+The dataset contains **100 flights × 45 seconds**, 90,100 RGB-D/IMU observations and 90,000 motor-command blocks, occupying 2.07 GiB. All files passed the audit; no collisions or unfinished files remain. Collection took 65.8 minutes at 22.8 camera frames per wall-clock second, with 6.58 GiB peak device-wide GPU usage, including other applications.
+
+The flight split is **80 training / 10 validation / 10 test**. The 21.4M-parameter RSSM trained for 10,000 steps with BF16, batch 16, length 64, and four loading workers in **13.0 minutes**. Peak tensor memory was **1.93 GiB**, with **2.25 GiB reserved**. All 140 validation windows were used for checkpoint selection; the best checkpoint is step **9,800**, validation loss **2.633**.
+
+Test evaluation used 100 windows, ten per test flight, with one second of sensor history followed by two seconds of predictions without observation corrections. Values below are means over the test windows; lower is better.
+
+| Horizon | RSSM RGB MSE | Last-frame RGB MSE | RSSM depth RMSE | Last-frame depth RMSE | RSSM position error |
+|---|---:|---:|---:|---:|---:|
+| 0.5 s | 0.000390 | 0.004830 | 0.0767 m | 0.2099 m | 0.0137 m |
+| 1.0 s | 0.000560 | 0.009423 | 0.0847 m | 0.3361 m | 0.0264 m |
+| 2.0 s | 0.000954 | 0.015645 | 0.1027 m | 0.5109 m | 0.0528 m |
+
+At two seconds, nominal physics has 0.000438 m mean position error and is substantially more accurate than learned motion. It receives the exact last simulator state and known physical parameters; the RSSM receives RGB-D, IMU, and actions. Learned relative pose is anchored at the last reference pose only when computing evaluation errors. Predictions respond to changed motor commands, but this sensitivity test does **not** establish that counterfactual predictions are correct.
+
+The drone visited a central 2.2 × 1.8 m region at altitudes 1.1–1.5 m, with speeds up to 0.389 m/s and all heading bins represented. Training and test flights share the same room and scripted trajectory family. The results establish prediction on this distribution, not a complete room map or reliable dynamics under unfamiliar actions. Next, broaden maneuvers and test predictions against simulator branches with changed commands, plus motion-head ablation and revisit checks, before learned exploration.
+
+Local artifacts: [prediction preview](runs/baseline-evaluation/prediction.png), [training curves](runs/baseline/training-curves.png), [baseline comparison](runs/baseline-evaluation/comparison.png), [dataset coverage](runs/pilot100/audit/coverage.png), [experiment summary](runs/pilot100/experiment-summary.json), [test metrics](runs/baseline-evaluation/metrics.json), and [best checkpoint](runs/baseline/best.pt). The [audit manifest](runs/pilot100/audit/audit.json) includes each flight's SHA-256; the source snapshot and hashes are under `runs/pilot100/source` and `runs/pilot100/source-manifest.json`. Generated data, checkpoints, and plots remain local under ignored `data/` and `runs/` directories.
+
 ## Roadmap
 
 - [x] Implement the collection, storage, RSSM training, and prediction interfaces.
@@ -140,8 +167,9 @@ Compare against visual persistence and nominal physics, and change future comman
 - [x] Finish the pinned simulator installation and validate the new CUDA environment.
 - [x] Validate the Isaac Lab room, drone dynamics, and RGB-D/IMU logging.
 - [x] Run a short training/checkpoint/held-out evaluation smoke test.
-- [ ] Collect and inspect the pilot flight dataset.
-- [ ] Train and evaluate the RSSM prediction baseline.
+- [x] Collect and inspect the pilot flight dataset.
+- [x] Train and evaluate the RSSM prediction baseline.
+- [ ] Broaden maneuvers; validate changed-action predictions, motion-head ablation, and revisits.
 - [ ] Add learned exploration and compare it with scripted sweeps at equal flight time.
 - [ ] Add persistent spatial memory and evaluate revisits.
 - [ ] Investigate adaptation to new rooms and changed drone parameters.

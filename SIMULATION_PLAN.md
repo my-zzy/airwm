@@ -17,12 +17,12 @@ This document defines the experiment and its milestones. Implementation began on
 - Installed the `airwm` Conda environment with Python 3.12.15, Isaac Lab 3.0.0, Isaac Sim 6.2.0, and PyTorch 2.11.0/CUDA 13.0. Exact versions and GPU execution pass [the environment check](setup/environment/doctor.json). The [runtime validation report](setup/environment/validation.json) records successful PhysX/RTX flight collection and a training/evaluation smoke test.
 - Confirmed the local NVIDIA GeForce RTX 5090 (32 GB VRAM), driver 580.178.04, and working CUDA in the new environment. Hover and moving-flight RGB-D/IMU checks passed with this existing driver; no driver change was needed.
 - Added a single-drone collector with a procedural furnished room, motor/controller model, synchronized RGB-D/IMU recording, and HDF5 flight storage.
-- Added the categorical RSSM, offline training, whole-flight splits, checkpoints, and open-loop prediction evaluation. All 13 CPU unit/integration tests pass. A 10-step run on simulator-collected data produced a checkpoint and finite held-out evaluation metrics; this verifies the pipeline, not useful learned prediction quality.
+- Added the categorical RSSM, offline training, whole-flight splits, checkpoints, and open-loop prediction evaluation. All 15 CPU unit/integration tests pass. A 10-step smoke run first verified the pipeline; the full pilot result is recorded in Section 4 below.
 - [Synthetic training profile](setup/environment/profile.json) with pinned PyTorch 2.11.0/CUDA 13.0: 21,427,536 parameters, BF16, batch 16, length 64; peak tensor memory **1.89 GiB** and PyTorch reserved memory **2.25 GiB**. This includes forward/backward/Adam state and excludes the simulator. The earlier 8–12 GB training estimate was a conservative planning budget, not a measured requirement.
 - Validated a five-second hover (101 observations) and three eight-second moving flights (483 observations), with no collisions and valid depth throughout. Fixed first-frame reset synchronization by initializing PhysX/Fabric before episode resets, refreshing camera poses, and capturing warmup frames before time zero. Recorded camera positions agree with the drone state within 0.000001 m; initial wall-depth checks agree within 0.0002 m.
 - Moving-flight collection ran at about 21.7 camera frames per wall-clock second, excluding startup. Peak device-wide GPU use was 6.78 GiB, including other applications. The first launch compiled shaders; subsequent validation launches reused that cache.
 - A controlled descent into the floor confirmed contact sensing and early episode termination at 1.9 seconds. The saved flight ends with its collision flag set. CLI and script-file launches passed; one inline `python -c` diagnostic crashed before startup, with the cause unisolated.
-- Nominal-physics and integrated pose evaluation work in the smoke pipeline. Full pilot-data collection, meaningful prediction-quality evaluation, autonomous exploration, persistent memory, and ablations remain future milestones.
+- Completed Section 3's first pilot: 100 flights × 45 seconds, 90,100 observations, no collisions, all data checks passed. Trained 10,000 steps on the 80/10/10 flight split; checkpoint selection used all 140 validation windows. Evaluated 100 windows across all ten test flights, evenly sampled within each flight. The first Section 4 prediction comparison passes the last-frame baseline; broader action tests, ablations, revisits, autonomous exploration, and persistent memory remain outstanding.
 
 ## 0. Conda environment and pinned software
 
@@ -105,6 +105,8 @@ isaaclab --help
 ```
 
 On a workstation with a display, launch `isaacsim` once and handle its first-run license prompt, then close it. The first startup may download extensions. A successful CUDA check is only the first check: before dataset collection, validate a one-environment RGB-D camera run using the selected physics and rendering backends, including valid depth, timestamps, and peak VRAM.
+
+For noninteractive collection, the runtime requires its license acknowledgement via `OMNI_KIT_ACCEPT_EULA=YES`, for example `OMNI_KIT_ACCEPT_EULA=YES bash setup/run.sh airwm collect ...`. The completed pilot used this process-local setting.
 
 After validation, record the resolved environment from the project root:
 
@@ -218,6 +220,14 @@ Evaluate predictions without feeding intermediate observations back into the mod
 
 Report RGB and depth prediction errors alongside position, orientation, velocity, and angular-velocity errors at each prediction horizon. Record any privileged state inputs used by comparison baselines so their results are interpreted appropriately.
 
+### First pilot result (2026-11-06)
+
+The [full results and artifact links](README.md#pilot-results-2026-11-06) record 100 complete 45-second flights (2.07 GiB), an 80/10/10 split, and 10,000 training steps. Collection took 65.8 minutes with 6.58 GiB peak device-wide GPU use. Training took 13.0 minutes with 1.93 GiB peak tensor memory / 2.25 GiB reserved. The best checkpoint was step 9,800, selected by validation loss 2.633.
+
+With one second of history and a two-second open-loop horizon, mean test RGB MSE was **0.000954** versus **0.015645** for the last-frame baseline (93.9% lower). Mean depth RMSE was **0.1027 m** versus **0.5109 m** (79.9% lower). Both image metrics beat persistence on all 100 sampled test windows. Integrated position error averaged **0.0528 m**; nominal physics, initialized with exact simulator state and known parameters, achieved **0.000438 m**. The learned model does not improve on that privileged physics baseline.
+
+These results are limited to the same room and gentle scripted sweeps: a central 2.2 × 1.8 m region, 1.1–1.5 m altitude, and maximum speed 0.389 m/s. All heading bins are covered, but motor commands occupy a narrow range. The changed-command test establishes sensitivity only; its +0.15 command perturbation is outside the collected range and has no paired simulator ground truth. Correct responses to new actions, motion-head ablations, and revisit retention still need evaluation. Do not treat this pilot as a complete room map or sufficient evidence for autonomous exploration.
+
 ## 5. Autonomous exploration
 
 After prediction is useful, introduce **Plan2Explore-style exploration**. Train an ensemble of predictors and reward actions whose predicted outcomes produce disagreement. This disagreement approximates where additional experience may improve the model. See [Plan2Explore](https://proceedings.mlr.press/v119/sekar20a.html).
@@ -246,11 +256,9 @@ The first model is specific to the training room. Adapting to a new room during 
 
 ## Immediate milestone
 
-The single-drone flight/sensor setup and a short training/evaluation smoke test are validated. Next, collect the planned pilot dataset of roughly 100 varied 30–60 second flights, inspect coverage and motion diversity, and train the first prediction baseline. Rendering throughput and peak VRAM from the setup checks are recorded above.
+The first pilot-data collection, 10,000-step baseline training, and held-out prediction comparison are complete. The model predicts two seconds of RGB-D and motion from one second of history, with image errors substantially below persistence on the sampled test flights.
 
-Provide **one second of camera/IMU history** and a future motor-command sequence, then predict the next **two seconds of RGB-D and drone motion**.
-
-Use held-out flights, action-sensitivity checks, and comparisons with simple baselines to determine whether the learned world model is ready to guide exploration.
+Next, broaden the controller's maneuvers and action range, evaluate changed-command predictions against paired simulator rollouts, and run the motion-head ablation and revisit tests in Section 4. Keep the current test results fixed as the pilot baseline and reserve new flights for subsequent experiments. Start Section 5's learned exploration only after the additional action-response checks support using the model to choose unfamiliar actions.
 
 ## References
 

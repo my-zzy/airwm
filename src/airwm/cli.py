@@ -33,6 +33,7 @@ def main(argv=None):
     train.add_argument("--run", default="runs/baseline")
     train.add_argument("--steps", type=int, default=10000)
     train.add_argument("--batch-size", type=int, default=16)
+    train.add_argument("--workers", type=int, default=0, help="CPU data-loading workers")
     train.add_argument("--length", type=int, default=64)
     train.add_argument("--lr", type=float, default=1e-4)
     train.add_argument("--eval-every", type=int, default=100)
@@ -71,6 +72,8 @@ def main(argv=None):
     elif args.command == "train":
         if args.eval_every < 1:
             parser.error("--eval-every must be positive")
+        if args.workers < 0:
+            parser.error("--workers must be nonnegative")
         from airwm.train import train
 
         train(args)

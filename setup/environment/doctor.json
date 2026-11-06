@@ -1,0 +1,28 @@
+{
+  "python": "3.12.15 | packaged by Anaconda, Inc. | (main, Oct  1 2026, 20:20:25) [GCC 14.3.0]",
+  "executable": "/home/user/miniconda3/envs/airwm/bin/python",
+  "platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.39",
+  "packages": {
+    "isaaclab": "3.0.0",
+    "isaacsim": "6.2.0.0",
+    "torch": "2.11.0+cu130",
+    "torchvision": "0.26.0+cu130",
+    "warp-lang": "1.17.0"
+  },
+  "expected_packages": {
+    "isaaclab": "3.0.0",
+    "isaacsim": "6.2.0.0",
+    "torch": "2.11.0",
+    "torchvision": "0.26.0",
+    "warp-lang": "1.17.0"
+  },
+  "pins_match": true,
+  "python_matches": true,
+  "cuda_available": true,
+  "cuda_build": "13.0",
+  "isaac_runtime_tested": false,
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "vram_GiB": 31.33453369140625,
+  "cuda_calculation": 4.0,
+  "nvidia_smi": "name, driver_version, memory.total [MiB], memory.used [MiB]\nNVIDIA GeForce RTX 5090, 580.178.04, 32607 MiB, 1849 MiB"
+}

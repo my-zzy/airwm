@@ -1,0 +1,149 @@
+{
+  "date": "2026-11-06",
+  "scope": "setup and short flight validation, not learned prediction quality",
+  "hover": {
+    "episodes": [
+      {
+        "path": "data/validation/hover01/flight_s0000_0000.h5",
+        "frames": 101,
+        "collision_frames": 0,
+        "mean_tracking_error_m": 0.0,
+        "max_tracking_error_m": 0.0,
+        "mean_valid_depth_fraction": 1.0,
+        "minimum_rgb_std_uint8": 33.86102880016403,
+        "initial_center_depth_m": 2.820000171661377
+      }
+    ],
+    "wall_seconds": 8.831011631991714,
+    "recorded_camera_frames": 101,
+    "camera_frames_per_wall_second": 11.436968289579847
+  },
+  "moving_flights": {
+    "episodes": [
+      {
+        "path": "data/validation/sweep04/flight_s0000_0000.h5",
+        "frames": 161,
+        "collision_frames": 0,
+        "mean_tracking_error_m": 0.2003114647057373,
+        "max_tracking_error_m": 0.41821298003196716,
+        "mean_valid_depth_fraction": 1.0,
+        "minimum_rgb_std_uint8": 25.44403149767075,
+        "initial_center_depth_m": 2.491827964782715,
+        "maximum_camera_position_error_m": 1.6858739115832577e-07
+      },
+      {
+        "path": "data/validation/sweep04/flight_s0000_0001.h5",
+        "frames": 161,
+        "collision_frames": 0,
+        "mean_tracking_error_m": 0.3061231285872054,
+        "max_tracking_error_m": 0.4352587163448334,
+        "mean_valid_depth_fraction": 1.0,
+        "minimum_rgb_std_uint8": 31.733166851797755,
+        "initial_center_depth_m": 1.9431877136230469,
+        "maximum_camera_position_error_m": 1.3328003944934608e-07
+      },
+      {
+        "path": "data/validation/sweep04/flight_s0000_0002.h5",
+        "frames": 161,
+        "collision_frames": 0,
+        "mean_tracking_error_m": 0.20821855237009004,
+        "max_tracking_error_m": 0.34219053387641907,
+        "mean_valid_depth_fraction": 1.0,
+        "minimum_rgb_std_uint8": 31.66959762226885,
+        "initial_center_depth_m": 2.5918331146240234,
+        "maximum_camera_position_error_m": 1.6858739115832577e-07
+      }
+    ],
+    "wall_seconds": 22.289734887192026,
+    "recorded_camera_frames": 483,
+    "camera_frames_per_wall_second": 21.669167553784508
+  },
+  "sensor_checks": [
+    {
+      "flight": "flight_s0000_0000.h5",
+      "observations": 161,
+      "action_blocks": 160,
+      "initial_wall_depth_expected_m": 2.49167537689209,
+      "initial_wall_depth_measured_m": 2.491827964782715,
+      "initial_depth_error_m": 0.000152587890625,
+      "position_range_m": [
+        0.8462460041046143,
+        0.3161296844482422,
+        0.24347257614135742
+      ]
+    },
+    {
+      "flight": "flight_s0000_0001.h5",
+      "observations": 161,
+      "action_blocks": 160,
+      "initial_wall_depth_expected_m": 1.9431818723678589,
+      "initial_wall_depth_measured_m": 1.9431877136230469,
+      "initial_depth_error_m": 5.841255187988281e-06,
+      "position_range_m": [
+        1.714197039604187,
+        1.011379599571228,
+        0.3704261779785156
+      ]
+    },
+    {
+      "flight": "flight_s0000_0002.h5",
+      "observations": 161,
+      "action_blocks": 160,
+      "initial_wall_depth_expected_m": 2.5918142795562744,
+      "initial_wall_depth_measured_m": 2.5918331146240234,
+      "initial_depth_error_m": 1.8835067749023438e-05,
+      "position_range_m": [
+        0.7986465096473694,
+        0.6603821516036987,
+        0.1424264907836914
+      ]
+    }
+  ],
+  "simulation_gpu_memory": {
+    "scope": "device-wide VRAM, including other processes",
+    "pid": 1165847,
+    "sample_interval_seconds": 0.5,
+    "samples": 51,
+    "error": null,
+    "peak_used_MiB": 6946.0,
+    "first_used_MiB": 1146.0
+  },
+  "reset_fix": "Initialize PhysX/Fabric with an unrecorded step before resets; publish poses, refresh camera poses and capture warmup before t=0.",
+  "isaac_runtime_passed": true,
+  "training_smoke": {
+    "steps": 10,
+    "parameters": 21427536,
+    "elapsed_seconds": 1.3010184729937464,
+    "best_validation_loss": 250.2591094970703,
+    "batch_size_requested": 2,
+    "max_batch_size_used": 2,
+    "sequence_length": 64,
+    "peak_tensor_GiB": 0.5024728775024414,
+    "peak_reserved_GiB": 0.58203125
+  },
+  "evaluation_smoke": {
+    "metrics_file": "runs/validation/evaluation01/metrics.json",
+    "windows": 2,
+    "all_metrics_finite": true,
+    "prediction_image": "runs/validation/evaluation01/prediction.png",
+    "checkpoint": "runs/validation/smoke01/best.pt",
+    "purpose": "Pipeline validation only; 10 training steps do not establish useful learned predictions.",
+    "horizon_metric_records": 6
+  },
+  "checks": {
+    "pytest_passed": 13,
+    "ruff_lint": "passed",
+    "ruff_format": "passed",
+    "shell_syntax": "passed",
+    "portable_lock_dry_run": "279 packages checked; no changes"
+  },
+  "contact_probe": {
+    "flight": "data/validation/contact02/flight_s0777_0000.h5",
+    "termination": "collision",
+    "observations": 39,
+    "contact_time_s": 1.9,
+    "final_height_m": 0.03508307784795761,
+    "scenario": "Start at z=1.3 m; command z=-0.2 m after t=0 to exercise floor-contact termination."
+  },
+  "diagnostic_launcher_note": "An inline python -c contact probe exited 139 before Kit startup; the equivalent script-file launch passed. Cause of inline launch failure was not isolated. Documented airwm CLI and script-file runs passed."
+}

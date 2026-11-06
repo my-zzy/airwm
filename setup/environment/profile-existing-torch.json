@@ -1,0 +1,18 @@
+{
+  "synthetic_benchmark": true,
+  "torch": "2.7.0+cu128",
+  "cuda_build": "12.8",
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "parameters": 21427536,
+  "batch_size": 16,
+  "sequence_length": 64,
+  "bf16": true,
+  "step_seconds": [
+    0.48160061286762357,
+    0.05333393416367471,
+    0.05172273004427552
+  ],
+  "peak_tensor_GiB": 1.9204888343811035,
+  "peak_reserved_GiB": 2.224609375,
+  "scope": "Training only; includes forward, backward and Adam state; excludes Isaac Sim."
+}

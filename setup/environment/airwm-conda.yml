@@ -1,0 +1,7 @@
+name: airwm
+channels:
+  - defaults
+dependencies:
+  - pip
+  - python=3.12
+prefix: /home/user/miniconda3/envs/airwm

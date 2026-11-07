@@ -17,13 +17,14 @@ This document defines the experiment and its milestones. Implementation began on
 - Installed the `airwm` Conda environment with Python 3.12.15, Isaac Lab 3.0.0, Isaac Sim 6.2.0, and PyTorch 2.11.0/CUDA 13.0. Exact versions and GPU execution pass [the environment check](setup/environment/doctor.json). The [runtime validation report](setup/environment/validation.json) records successful PhysX/RTX flight collection and a training/evaluation smoke test.
 - Confirmed the local NVIDIA GeForce RTX 5090 (32 GB VRAM), driver 580.178.04, and working CUDA in the new environment. Hover and moving-flight RGB-D/IMU checks passed with this existing driver; no driver change was needed.
 - Added a single-drone collector with a procedural furnished room, motor/controller model, synchronized RGB-D/IMU recording, and HDF5 flight storage.
-- Added the categorical RSSM, offline training, whole-flight splits, checkpoints, open-loop prediction evaluation, and matched simulator branching. All 20 CPU unit/integration tests pass. A 10-step smoke run first verified the pipeline; the full pilot and subsequent action-response results are recorded in Section 4 below.
+- Added the categorical RSSM, offline training, whole-flight splits, checkpoints, open-loop prediction evaluation, matched simulator branching, and randomized maneuver collection. All 24 CPU unit/integration tests pass. A 10-step smoke run first verified the pipeline; the full experiments are recorded in Section 4 below.
 - [Synthetic training profile](setup/environment/profile.json) with pinned PyTorch 2.11.0/CUDA 13.0: 21,427,536 parameters, BF16, batch 16, length 64; peak tensor memory **1.89 GiB** and PyTorch reserved memory **2.25 GiB**. This includes forward/backward/Adam state and excludes the simulator. The earlier 8–12 GB training estimate was a conservative planning budget, not a measured requirement.
 - Validated a five-second hover (101 observations) and three eight-second moving flights (483 observations), with no collisions and valid depth throughout. Fixed first-frame reset synchronization by initializing PhysX/Fabric before episode resets, refreshing camera poses, and capturing warmup frames before time zero. Recorded camera positions agree with the drone state within 0.000001 m; initial wall-depth checks agree within 0.0002 m.
 - Moving-flight collection ran at about 21.7 camera frames per wall-clock second, excluding startup. Peak device-wide GPU use was 6.78 GiB, including other applications. The first launch compiled shaders; subsequent validation launches reused that cache.
 - A controlled descent into the floor confirmed contact sensing and early episode termination at 1.9 seconds. The saved flight ends with its collision flag set. CLI and script-file launches passed; one inline `python -c` diagnostic crashed before startup, with the cause unisolated.
 - Completed Section 3's first pilot: 100 flights × 45 seconds, 90,100 observations, no collisions, all data checks passed. Trained 10,000 steps on the 80/10/10 flight split; checkpoint selection used all 140 validation windows. Evaluated 100 windows across all ten test flights, evenly sampled within each flight. The first Section 4 prediction comparison passes the last-frame baseline.
 - Completed the paired action-response test: eight new histories and 96 simulator branches, with exact control-state/depth replay and no collisions. The fixed checkpoint almost ignores the tested action changes. Improving action-response learning, ablations, and revisits remain necessary before autonomous exploration; persistent memory is still a later milestone.
+- Completed the controlled data-only follow-up on 2026-11-07: 100 varied flights, all 2,200 pulses verified, and 10,000 training steps with unchanged settings. Both checkpoints were compared on identical held-out flights and 96 branches from eight new histories. The new model improves maneuver prediction relative to the pilot but does not beat two-second RGB-D persistence; sweep prediction worsens. Pitch/roll action response remains negligible and yaw is inconsistent. The action-response gate remains unmet.
 
 ## 0. Conda environment and pinned software
 
@@ -204,6 +205,48 @@ Keep Dreamer's loss-balancing mechanisms initially. The depth and motion losses 
 
 Split the dataset by complete flights into training, validation, and test sets. Adjacent frames from one flight must stay in the same split.
 
+### Controlled varied-maneuver experiment
+
+The implemented `collect --trajectory maneuvers` behavior policy samples a waypoint
+and heading every four seconds, returns to the initial position periodically, and
+injects an independent motor-axis pulse every two seconds. Axis order, sign,
+amplitude, and pulse duration are seeded. Collective offsets are 0.005/0.010/0.020,
+roll and pitch offsets 0.0005/0.0010/0.0015, and yaw offsets 0.005/0.010/0.015,
+with both signs. Units are normalized desired rotor speed. Pulse durations are
+0.15/0.20/0.25 seconds. Feedback is held at its pre-pulse command during a pulse
+and resumes afterwards; all applied motor commands are logged at 100 Hz.
+
+Waypoints stay within x/y ±1.1 m and altitude 1.1–1.9 m. A privileged collection
+supervisor cancels an active pulse and steers toward the room centre outside
+x/y ±1.65 m, altitude 0.9–2.3 m, or 30 degrees of tilt. This envelope is a recovery
+rule, not a collision guarantee. Recovery data and collisions are retained;
+collisions terminate the episode. The learner never receives simulator state as
+an observation. Pulse schedules and actual application counts are stored in each
+flight's metadata and included in the audit.
+
+The first comparison uses 100 × 45-second independent flights (seed 302), matching
+the pilot's collection duration and training budget. Keep model.py, loss,
+optimizer, 10,000 steps, batch 16, length 64, and seed 0 unchanged. Select the
+checkpoint by whole-validation loss. The three seed-301 smoke flights are excluded.
+Record data, code, checkpoint, and environment hashes. Source code for the model,
+training, data loader, physical configuration, and motor/controller dynamics was
+verified identical to the pilot before starting this experiment.
+
+Evaluate both checkpoints on identical held-out maneuver flights and eight new
+seed-401 sweep histories with matched simulator interventions. The existing
+seed-101 bank stays a fixed diagnostic. Compare signed action-effect gain and
+error with the zero-effect baseline, and compare forecasts supplied changed
+versus unchanged commands. Report shared-history counts rather than treating
+all branches as independent samples. No architecture/loss tuning uses the new
+bank before this comparison; future tuning requires another reserved bank.
+
+This experiment tests the combined collection-policy change. It does not isolate
+which data component helps, and one training seed does not establish repeatability.
+If action prediction still fails, test action normalization and explicit multi-step
+RGB-D/motion objectives separately. Training multiple branches from a common
+history is another planned intervention; those branches must be split by source
+history and use enough context plus future frames for the training sequence length.
+
 ## 4. Prediction evaluation
 
 The first demonstration should show actual and predicted RGB-D sequences side by side, with motion errors underneath.
@@ -237,6 +280,46 @@ The step-9,800 pilot checkpoint substantially underpredicts action effects. At t
 
 Pitch and roll commands stay within the pilot's per-motor ranges, although their joint sequences and resulting motion differ from the scripted training policy. This is evidence against trusting the current checkpoint to select unfamiliar actions. The exact contributions of limited excitation, action scaling, and training objectives are hypotheses to test, not established causes. Preserve this branch bank as a diagnostic and reserve new histories for evaluating any tuned model.
 
+### Varied-data result (2026-11-07)
+
+The [full result and artifacts](README.md#varied-maneuver-experiment-2026-11-07)
+record 100 × 45-second seed-302 maneuver flights, 90,100 observations (2.04 GiB),
+and 2,200 independently randomized axis pulses. All pulses were verified against
+recorded states/commands; no collisions, cancellations or recovery interventions
+occurred. About 0.17% of actual command components reached actuator bounds;
+none of the added pulses required clipping. Maximum speed was 2.10 m/s, angular
+speed 3.01 rad/s, and altitude 1.06–1.92 m. Collection took 75.3 minutes with 7.35 GiB
+peak device-wide VRAM. Training took 13.0 minutes with 1.93 GiB peak tensor memory
+and 2.25 GiB reserved. Validation selected step 9,700 (loss 7.4913).
+
+On 100 identical maneuver test windows, two-second RGB MSE improved from the
+pilot's 0.017039 to 0.011076, and depth RMSE from 0.6971 to 0.5100 m. Both still
+lose to persistence (0.009963 and 0.4113 m). On the original sweep test windows,
+the new model's RGB/depth/position errors worsen to 0.015111 / 0.5620 m / 0.5893 m,
+versus 0.000954 / 0.1027 m / 0.0528 m for the pilot. Neither result establishes
+reliable dynamics under unfamiliar commands.
+
+The eight new seed-401 histories produced 96 complete, collision-free branches.
+Control/repeat states and depth matched exactly; mean repeat RGB MSE was 0.0000924.
+At two seconds, pitch/roll pulses changed actual position by about 0.535 m, but the
+new model predicted changes below 0.000008 m. Collective +0.020 produced a predicted
+change of 0.0271 m versus 0.2329 m actual, with mean signed gain −0.0104 and effect
+error worse than predicting no response. Positive/negative yaw gains were 0.1871 /
+0.0617 (1 is correct), with substantial variation across histories, including a
+wrong-sign negative-yaw case. The original fixed diagnostic also remains unsolved.
+
+At this compute budget and seed, broader data alone is insufficient. This experiment
+does not identify a sole failure cause or establish that varied data cannot help.
+The [input-rounding diagnostic](runs/maneuvers01/action-precision.json) shows BF16
+rounding erases 82.5% of changed components in the old bank's small positive
+pitch/roll pulses, while larger failed interventions survive rounding. Test
+normalization before BF16 projection next, using training-only statistics saved
+with the checkpoint and preserving old-checkpoint behavior. Then test explicit
+multi-step prediction and motion weighting separately. Retain the same data/split
+for these ablations; investigate mixed sweep/maneuver training as a separate data
+experiment if needed. Reserve fresh evaluation histories, because both existing
+branch banks are now inspected. Motion-head and dedicated revisit tests remain.
+
 ## 5. Autonomous exploration
 
 After prediction is useful, introduce **Plan2Explore-style exploration**. Train an ensemble of predictors and reward actions whose predicted outcomes produce disagreement. This disagreement approximates where additional experience may improve the model. See [Plan2Explore](https://proceedings.mlr.press/v119/sekar20a.html).
@@ -265,9 +348,9 @@ The first model is specific to the training room. Adapting to a new room during 
 
 ## Immediate milestone
 
-The pilot baseline and paired simulator-branching experiment are complete. Familiar-sweep prediction beats persistence, but the model almost ignores the tested action interventions. Section 4's action-response requirement is not yet met.
+The pilot, matched simulator branching, and controlled varied-data experiment are complete. Broader data improves maneuver prediction relative to the pilot, but does not solve action response and reduces sweep prediction quality. Section 4's action-response requirement is not yet met.
 
-Next, broaden and randomize maneuvers to excite the independent control axes, investigate motor-input normalization and stronger multi-step motion/action objectives, then retrain. Keep the pilot and branch-bank results fixed; use new histories for final evaluation after tuning. Run the motion-head ablation and revisit tests as well. Section 5's learned exploration remains gated on reliable action-response predictions.
+Next, implement checkpointed action normalization using training-only statistics, and compare it with the unchanged-data-only model on the same split and training budget. Then test explicit multi-step RGB-D/motion losses separately. Keep both checkpoints and both branch banks fixed; use new histories for final evaluation after tuning. Run the motion-head ablation and revisit tests as well. Section 5's learned exploration remains gated on reliable action-response predictions.
 
 ## References
 

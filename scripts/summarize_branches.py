@@ -52,8 +52,7 @@ def summarize(evaluation, pilot_audit):
             for v, rows in report["summary_by_variant_and_horizon"].items()
             if "2.0" in rows
         },
-        "conclusion": "The pilot checkpoint underpredicts the tested action effects by orders of magnitude. Matched-command predictions are almost unchanged from predictions using the original commands. Do not use this checkpoint for autonomous exploration. This result is limited to the tested eight histories and intervention family.",
-        "next_experiment": "Broaden and randomize maneuvers, investigate motor-input normalization and stronger multi-step motion/action objectives, then retrain. Keep these branches as a fixed diagnostic and reserve new histories for final testing. Motion-head ablation and revisit evaluation remain outstanding.",
+        "interpretation": "Signed effect gain 0 means ignoring the intervention; 1 means reproducing its signed magnitude. Compare effect error with actual effect magnitude and matched-command errors with unchanged-command errors. A nonzero response alone is not evidence of correctness. Conclusions are limited to the sampled histories and intervention family; this summary does not certify readiness for exploration.",
     }
     (evaluation / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     means = summary["two_second_means"]

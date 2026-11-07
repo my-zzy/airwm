@@ -17,6 +17,7 @@ import torch
 from airwm.config import FlightConfig
 from airwm.data import EpisodeWriter
 from airwm.dynamics import Motors, body_vector, controller, imu_sample, rotation_matrix
+from airwm.maneuvers import ManeuverPolicy
 
 
 def _tensor(value):
@@ -194,10 +195,17 @@ def _collect(args, monitor, plans=None):
         reports = []
         for episode in range(args.episodes):
             plan = plans[episode] if plans is not None else None
+            maneuver = (
+                ManeuverPolicy(args.seed, episode, args.seconds, sim.device, cfg)
+                if args.trajectory == "maneuvers"
+                else None
+            )
             phase = (
                 plan["metadata"]["source_phase"] if plan else float(rng.uniform(-math.pi, math.pi))
             )
             pos, yaw = target_at(0, phase, args.trajectory == "hover", sim.device)
+            if maneuver:
+                pos, yaw = maneuver.target(0)
             pose = torch.cat(
                 (
                     pos,
@@ -261,6 +269,8 @@ def _collect(args, monitor, plans=None):
             }
             if plan:
                 metadata.update(plan["metadata"])
+            if maneuver:
+                metadata.update(maneuver.metadata())
             frame_errors = []
             collision_count = 0
             valid_fractions = []
@@ -326,6 +336,10 @@ def _collect(args, monitor, plans=None):
                         t = frame / cfg.camera_hz + control / cfg.control_hz
                         if plan:
                             command = replay_actions[frame, control][None]
+                        elif maneuver:
+                            command = maneuver.command(
+                                frame * cfg.controls_per_frame + control, motors, state
+                            )
                         else:
                             target, yaw = target_at(
                                 t, phase, args.trajectory == "hover", sim.device
@@ -375,6 +389,8 @@ def _collect(args, monitor, plans=None):
                         target_at_frame = torch.as_tensor(
                             plan["reference_states"][frame + 1, :3], device=sim.device
                         )[None]
+                    elif maneuver:
+                        target_at_frame, _ = maneuver.target((frame + 1) * cfg.controls_per_frame)
                     else:
                         target_at_frame, _ = target_at(
                             (frame + 1) / cfg.camera_hz,
@@ -390,6 +406,9 @@ def _collect(args, monitor, plans=None):
                     if not sim.is_running():
                         raise RuntimeError("Simulator closed during collection")
                 writer.file.attrs["termination"] = "collision" if collision_count else "time_limit"
+                if maneuver:
+                    metadata.update(maneuver.metadata())
+                    writer.file.attrs["metadata"] = json.dumps(metadata)
             report = {
                 "path": str(filename),
                 "frames": writer.count,
@@ -406,6 +425,10 @@ def _collect(args, monitor, plans=None):
                 report["source"] = plan["metadata"]["source"]
                 report["mean_reference_deviation_m"] = report.pop("mean_tracking_error_m")
                 report["max_reference_deviation_m"] = report.pop("max_tracking_error_m")
+            if maneuver:
+                report["pulse_events"] = maneuver.metadata()["pulse_events"]
+                report["recovery_controls"] = maneuver.recovery_controls
+                report["clipped_command_values"] = maneuver.clipped_values
             reports.append(report)
             print(json.dumps(report), flush=True)
         summary = {

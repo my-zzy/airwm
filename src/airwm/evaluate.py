@@ -60,6 +60,19 @@ def summarize_metrics(metrics):
     return summaries
 
 
+def evaluation_paths(checkpoint, split, split_file=None):
+    """Allow comparisons on identical flights without admitting training data."""
+    splits = json.loads(Path(split_file).read_text()) if split_file else checkpoint["split"]
+    paths = splits[split]
+    resolved = [str(Path(p).resolve()) for p in paths]
+    training = {str(Path(p).resolve()) for p in checkpoint["split"]["train"]}
+    if not paths or len(set(resolved)) != len(paths):
+        raise ValueError("Evaluation flights must be nonempty and unique")
+    if training.intersection(resolved):
+        raise ValueError("Evaluation overlaps the checkpoint's training flights")
+    return paths
+
+
 def save_preview(path, truth, predicted, persistence, camera_hz):
     # RGB rows followed by metric-depth grayscale rows; columns span the rollout.
     indices = np.linspace(0, len(truth) - 1, min(8, len(truth)), dtype=int)
@@ -95,7 +108,8 @@ def evaluate(args):
     model = WorldModel(ModelConfig(**checkpoint["model_config"])).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
-    paths = checkpoint["split"][args.split]
+    split_file = getattr(args, "split_file", None)
+    paths = evaluation_paths(checkpoint, args.split, split_file)
     dataset = FlightSequences(
         paths, args.context + args.horizon, stride=args.context + args.horizon
     )
@@ -220,6 +234,7 @@ def evaluate(args):
             )
     report = {
         "split": args.split,
+        "split_file": str(Path(split_file).resolve()) if split_file else None,
         "checkpoint": str(Path(args.checkpoint).resolve()),
         "context_frames": args.context,
         "future_frames": args.horizon,

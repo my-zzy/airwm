@@ -25,7 +25,7 @@ def main(argv=None):
     collect.add_argument("--episodes", type=int, default=3)
     collect.add_argument("--seconds", type=float, default=30.0)
     collect.add_argument("--seed", type=int, default=0)
-    collect.add_argument("--trajectory", choices=["hover", "sweep"], default="sweep")
+    collect.add_argument("--trajectory", choices=["hover", "sweep", "maneuvers"], default="sweep")
     collect.add_argument("--device", default="cuda:0")
     collect.add_argument("--gui", action="store_true")
     branch = commands.add_parser(
@@ -72,6 +72,10 @@ def main(argv=None):
     evaluate.add_argument("--checkpoint", required=True)
     evaluate.add_argument("--output", default="runs/evaluation")
     evaluate.add_argument("--split", choices=["validation", "test"], default="test")
+    evaluate.add_argument(
+        "--split-file",
+        help="Evaluate a shared split.json; rejects this checkpoint's training flights",
+    )
     evaluate.add_argument("--context", type=int, default=20)
     evaluate.add_argument("--horizon", type=int, default=40)
     evaluate.add_argument("--windows", type=int, default=10)

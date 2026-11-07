@@ -8,10 +8,49 @@ from pathlib import Path
 import h5py
 import matplotlib
 import numpy as np
+import torch
 from PIL import Image, ImageDraw
+
+from airwm.config import FlightConfig
+from airwm.dynamics import Motors, controller
+from airwm.maneuvers import PATTERNS
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+
+def audit_pulses(metadata, cfg, states, actions):
+    """Recompute pulse onset from recorded state and verify the held command."""
+    if metadata.get("maneuver_protocol") != "waypoints_axis_pulses_v1":
+        return 0
+    motors = Motors(FlightConfig(**cfg))
+    flat = actions.reshape(-1, 4)
+    checked = 0
+    for event in metadata["pulse_events"]:
+        count = event["applied_controls"]
+        if not count:
+            continue
+        start, end = event["start_control"], event["end_control"]
+        assert 0 < count <= end - start and start + count <= len(flat)
+        if not event["cancelled"]:
+            assert count == end - start
+        per_frame = cfg["control_hz"] // cfg["camera_hz"]
+        assert start % per_frame == 0, "Pulse onset must have a recorded camera state"
+        state = torch.from_numpy(states[start // per_frame])[None]
+        index = start // round(metadata["waypoint_period_seconds"] * cfg["control_hz"])
+        target = torch.tensor([metadata["waypoints_xyz_m"][index]], dtype=torch.float32)
+        yaw = torch.tensor([metadata["waypoint_yaw_rad"][index]], dtype=torch.float32)
+        base = controller(
+            motors, state[:, :3], state[:, 3:7], state[:, 7:10], state[:, 10:13], target, yaw
+        )
+        offset = event["amplitude"] * torch.tensor(PATTERNS[event["axis"]])
+        expected = (base[0] + offset).clamp(0, 1).numpy()
+        np.testing.assert_allclose(flat[start], expected, atol=1e-5, rtol=0)
+        np.testing.assert_array_equal(
+            flat[start : start + count], np.broadcast_to(flat[start], (count, 4))
+        )
+        checked += 1
+    return checked
 
 
 def audit(folder, output, expected):
@@ -24,6 +63,7 @@ def audit(folder, output, expected):
         raise ValueError("No complete flights")
     output.mkdir(parents=True, exist_ok=False)
     records, positions, velocities, headings, commands, trajectories = [], [], [], [], [], []
+    angular_velocities = []
     preview = Image.new("RGB", (8 * 128, 5 * 152), "white")
     draw = ImageDraw.Draw(preview)
     preview_flights = np.linspace(0, len(files) - 1, min(5, len(files)), dtype=int).tolist()
@@ -40,6 +80,7 @@ def audit(folder, output, expected):
             assert np.allclose(np.diff(t), 1 / cfg["camera_hz"], atol=1e-7), path
             assert np.allclose(np.linalg.norm(state[:, 3:7], axis=-1), 1, atol=1e-4), path
             assert actions.min() >= 0 and actions.max() <= 1, path
+            pulses_checked = audit_pulses(metadata, cfg, state, actions)
             valid_pixels, total_pixels, rgb_stds, depth_min, depth_max = 0, 0, [], float("inf"), 0
             for start in range(0, n, 128):
                 stop = min(n, start + 128)
@@ -62,6 +103,7 @@ def audit(folder, output, expected):
             collisions = int(f["collision"][:].sum())
             positions.append(state[:, :3])
             velocities.append(state[:, 7:10])
+            angular_velocities.append(state[:, 10:13])
             trajectories.append(state[:, :3])
             x, y, z, w = state[:, 3:7].T
             headings.append(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))
@@ -82,6 +124,11 @@ def audit(folder, output, expected):
                     "minimum_rgb_std_uint8": min(rgb_stds),
                     "phase": metadata.get("phase"),
                     "sha256": digest,
+                    "trajectory": metadata.get("trajectory"),
+                    "pulse_events": metadata.get("pulse_events", []),
+                    "recovery_controls": metadata.get("recovery_controls", 0),
+                    "clipped_command_values": metadata.get("clipped_command_values", 0),
+                    "recorded_pulses_verified": pulses_checked,
                 }
             )
             if i in preview_flights:
@@ -98,6 +145,11 @@ def audit(folder, output, expected):
     cells_xy = np.unique(np.floor((position[:, :2] + 3) / 0.25).astype(int), axis=0)
     cells_xyz = np.unique(np.floor((position + [3, 3, 0]) / 0.25).astype(int), axis=0)
     yaw_histogram, _ = np.histogram(heading, np.linspace(-np.pi, np.pi, 25))
+    # Orthonormal axis patterns expose differential excitation that per-motor
+    # marginal ranges alone cannot establish. Offsets remain speed units, not N.
+    axis_commands = action @ np.array(list(PATTERNS.values()), dtype=np.float64).T / 4
+    axis_covariance = np.cov(axis_commands, rowvar=False)
+    events = [e for r in records for e in r["pulse_events"]]
     report = {
         "complete_flights": len(files),
         "partial_files": [str(p) for p in folder.glob("*.partial")],
@@ -114,14 +166,32 @@ def audit(folder, output, expected):
                 np.percentile(np.linalg.norm(velocity, axis=-1), [0, 50, 95, 100]).tolist(),
             )
         ),
+        "angular_speed_percentiles_rad_s": dict(
+            zip(
+                ("p0", "p50", "p95", "p100"),
+                np.percentile(
+                    np.linalg.norm(np.concatenate(angular_velocities), axis=-1), [0, 50, 95, 100]
+                ).tolist(),
+            )
+        ),
         "motor_command_min": action.min(0).tolist(),
         "motor_command_max": action.max(0).tolist(),
         "motor_command_std": action.std(0).tolist(),
+        "motor_command_at_bound_fraction": ((action == 0) | (action == 1)).mean(0).tolist(),
+        "axis_command_std": dict(zip(PATTERNS, axis_commands.std(0).tolist())),
+        "axis_command_covariance": axis_covariance.tolist(),
+        "pulse_counts_by_axis": {axis: sum(e["axis"] == axis for e in events) for axis in PATTERNS},
+        "pulse_controls_applied": sum(e["applied_controls"] for e in events),
+        "recorded_pulses_verified": sum(r["recorded_pulses_verified"] for r in records),
+        "cancelled_pulses": sum(e["cancelled"] for e in events),
+        "recovery_controls": sum(r["recovery_controls"] for r in records),
+        "clipped_command_values": sum(r["clipped_command_values"] for r in records),
+        "clipping_note": "The maneuver policy's clipped_command_values counts clipping after adding a pulse offset. Feedback mixing can also reach actuator bounds; motor_command_at_bound_fraction measures the actual recorded commands at 0 or 1.",
         "yaw_15degree_bin_counts": yaw_histogram.tolist(),
         "visited_xy_0_25m_cells": len(cells_xy),
         "room_xy_0_25m_cells": 24 * 24,
         "visited_xyz_0_25m_cells": len(cells_xyz),
-        "coverage_note": "Pose occupancy measures where the drone flew, not what surfaces were seen. Central scripted sweeps do not establish complete room reconstruction or broad dynamics coverage.",
+        "coverage_note": "Pose occupancy measures where the drone flew, not what surfaces were seen. These paths do not establish complete room reconstruction. Axis-command statistics describe collected excitation, not learned action-response accuracy.",
         "flights": records,
     }
     (output / "audit.json").write_text(json.dumps(report, indent=2) + "\n")

@@ -1,4 +1,8 @@
-from airwm.evaluate import evaluation_indices
+import json
+
+import pytest
+
+from airwm.evaluate import evaluation_indices, evaluation_paths
 
 
 def test_evaluation_covers_flights_and_late_windows():
@@ -21,3 +25,17 @@ def test_evaluation_handles_short_flights_and_oversized_budget():
     selected = evaluation_indices(windows, 5)
     assert len(selected) == len(set(selected)) == 5
     assert {windows[i][0] for i in selected} == {0, 1, 2}
+
+
+def test_shared_evaluation_split_rejects_training_overlap_and_duplicates(tmp_path):
+    checkpoint = {"split": {"train": [str(tmp_path / "a.h5")], "test": [str(tmp_path / "b.h5")]}}
+    split = tmp_path / "split.json"
+    split.write_text(json.dumps({"test": [str(tmp_path / "c.h5")]}))
+    assert evaluation_paths(checkpoint, "test", split) == [str(tmp_path / "c.h5")]
+    assert evaluation_paths(checkpoint, "test") == [str(tmp_path / "b.h5")]
+    split.write_text(json.dumps({"test": [str(tmp_path / "sub" / ".." / "a.h5")]}))
+    with pytest.raises(ValueError, match="overlaps"):
+        evaluation_paths(checkpoint, "test", split)
+    split.write_text(json.dumps({"test": ["a.h5", "a.h5"]}))
+    with pytest.raises(ValueError, match="unique"):
+        evaluation_paths(checkpoint, "test", split)

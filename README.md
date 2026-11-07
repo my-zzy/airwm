@@ -4,7 +4,7 @@ A simulation research project for a drone that explores an indoor room and learn
 
 The goal is to learn visible room geometry, appearance, and flight dynamics from RGB-D, IMU measurements, and motor-command histories, then use those predictions to guide further exploration.
 
-**Status:** the first pilot and the paired action-response experiment are complete. The RSSM forecasts familiar sweeps well (93.9% lower RGB MSE and 79.9% lower depth RMSE than persistence at two seconds), but it almost ignores tested changes in motor commands. It is **not ready to guide autonomous exploration**. Next, broaden maneuvers and improve action-response learning before retraining. All 20 CPU tests pass.
+**Status:** the pilot, paired action test, and controlled varied-maneuver experiment are complete. Training the unchanged RSSM on broader flight data improves prediction on that distribution, but pitch/roll action responses remain negligible, yaw response is inconsistent, and sweep prediction worsens. Neither checkpoint is **ready to guide autonomous exploration**. Next, test action normalization and explicit multi-step objectives separately. All 24 CPU tests pass. See the [latest results](#varied-maneuver-experiment-2026-11-07).
 
 See [SIMULATION_PLAN.md](SIMULATION_PLAN.md) for the detailed experiment design, evaluation protocol, and references.
 
@@ -197,7 +197,128 @@ bash setup/run.sh python scripts/summarize_branches.py \
 
 Artifacts: [action effects](runs/action_branches01/evaluation-verified/action-effects.png), [response curves](runs/action_branches01/evaluation-verified/response-curves.png), [pitch prediction preview](runs/action_branches01/evaluation-verified/pitch_positive.png), [summary](runs/action_branches01/evaluation-verified/summary.json), [full metrics](runs/action_branches01/evaluation-verified/metrics.json), and [experiment manifest](runs/action_branches01/experiment-manifest.json). The manifest records source, dataset, checkpoint, and environment-lock hashes; the source snapshot is under `runs/action_branches01/source`. The original pilot checkpoint and results are preserved. CPU tests cover intervention timing/direction, rotor-state restoration, paired-effect scoring, invalid restores, and evaluation plumbing. A fresh two-second hover also passed after the collector changes.
 
-Next, collect randomized maneuvers that excite the independent control axes, investigate motor-input normalization and stronger multi-step motion/action objectives, then retrain. Keep this branch bank as a fixed diagnostic; reserve new histories for the final evaluation after tuning. Motion-head ablation and revisit tests remain part of Step 4. Plan2Explore follows only once action-response predictions become reliable.
+The varied-maneuver experiment below follows up on this failure. This original branch bank remains a fixed diagnostic. Motion-head ablation and revisit tests remain part of Step 4; Plan2Explore follows only once action-response predictions become reliable.
+
+## Varied-maneuver experiment (2026-11-07)
+
+The `maneuvers` collection policy adds seeded random waypoints, altitude changes,
+turns, returns to the start, and separate collective/roll/pitch/yaw motor pulses.
+During each 0.15–0.25 s pulse it holds the pre-pulse controller command plus a
+normalized rotor-speed offset, then resumes feedback. The controller uses
+simulator state for collection only. All actual commands, recovery interventions,
+and pulse events are retained. Training still receives only RGB-D, IMU, and actions.
+
+After three 16-second smoke flights, the full collection completed **100 × 45-second
+flights**, 90,100 observations and 90,000 transitions (2.04 GiB), without collisions
+or recovery interventions. The audit reconstructed and verified all **2,200 pulses**
+against recorded states and commands. No pulses were cancelled or clipped after
+offset addition. Feedback mixing reached actuator bounds on about 0.17% of command
+components; those actual commands remain in the data. Maximum speed was 2.10 m/s,
+and altitude spanned 1.06–1.92 m. Command standard deviations in collective, roll,
+pitch and yaw were respectively 20×, 105×, 83× and 56× the pilot's values.
+These describe collected excitation, not learned action accuracy or room coverage.
+
+Collection took 75.3 minutes, with **7.35 GiB peak device-wide GPU use**, including
+other applications. Training took 13.0 minutes, with **1.93 GiB peak tensor memory /
+2.25 GiB reserved**. Best checkpoint: step **9,700**, selected by validation loss
+7.4913. Validation losses across the different datasets are not directly comparable.
+
+This experiment changed **data only**: 100 independent 45-second flights,
+an 80/10/10 whole-flight split, the same RSSM and loss, and 10,000 training steps
+with the pilot's settings. Collection seed is 302, training/split seed is 0.
+The smoke data and all evaluation branches are excluded from training.
+The [recorded protocol](runs/maneuvers01/protocol.json) fixes these choices and
+reserved eight new seed-401 histories for paired evaluation. This is one training
+seed; it does not establish a statistically replicated improvement.
+
+Both models were evaluated on the **same 100 windows from ten test flights** in
+each dataset, using one second of history and a two-second open-loop forecast:
+
+| Test flights | Model | RGB MSE | Depth RMSE (m) | Position error (m) |
+|---|---|---:|---:|---:|
+| Maneuvers | Pilot | 0.017039 | 0.6971 | 0.7351 |
+| Maneuvers | New model | 0.011076 | 0.5100 | 0.6082 |
+| Maneuvers | Last-frame baseline | 0.009963 | 0.4113 | — |
+| Sweeps | Pilot | 0.000954 | 0.1027 | 0.0528 |
+| Sweeps | New model | 0.015111 | 0.5620 | 0.5893 |
+
+On maneuvers, the new model improves over the pilot but still loses to persistence
+in mean two-second RGB/depth error. It also loses the pilot's strong sweep prediction.
+The pose errors use the last ground-truth pose only to anchor evaluation; the model
+does not receive it as an observation.
+
+The **96 new branches across eight shared histories** completed without collisions
+or censored horizons. Control/repeat state and depth replay matched exactly;
+repeat RGB MSE averaged 0.0000924. Mean effects at two seconds were:
+
+| Intervention | Simulator effect | New predicted effect | Mean signed gain |
+|---|---:|---:|---:|
+| Collective +0.020 | 0.2329 m | 0.0271 m | −0.0104 |
+| Pitch positive | 0.5354 m | 0.0000075 m | approximately 0 |
+| Roll positive | 0.5353 m | 0.0000026 m | approximately 0 |
+| Yaw positive | 0.0904 rad | 0.0177 rad | 0.1871 |
+| Yaw negative | 0.0904 rad | 0.0148 rad | 0.0617 |
+
+A gain of 1 reproduces the signed effect; 0 ignores it. Collective response has
+larger magnitude but poor direction, with effect error exceeding the zero-response
+baseline. Pitch/roll remain effectively ignored. Yaw improves partially but varies
+strongly by history: positive-yaw gains range from 0.041 to 0.941; one negative-yaw
+case has the wrong sign. The original diagnostic bank also fails, with mean
+positive-yaw gain −0.034. **Data diversity alone, at this training budget, does not
+meet the action-response requirement.** Preserve both checkpoints and result sets.
+
+An [input-rounding diagnostic](runs/maneuvers01/action-precision.json) found that
+BF16 rounding erases 82.5% of changed command components in the original bank's
+small positive pitch/roll pulses. This is not a trained-model ablation or a complete
+explanation: larger collective/yaw changes survive rounding and still fail.
+It motivates normalizing actions before low-precision projections as the next
+separate experiment, with statistics fitted only on training data and saved with
+the checkpoint. Explicit multi-step RGB-D/motion losses follow separately.
+
+Artifacts: [full summary](runs/maneuvers01/experiment-summary.json),
+[flight comparison](runs/maneuvers01/flight-comparison.png),
+[action comparison](runs/maneuvers01/new-branches-comparison/action-comparison.png),
+[prediction preview](runs/maneuvers01/new-branches-model/pitch_positive.png),
+[training curves](runs/maneuvers01/model/training-curves.png),
+[data audit](runs/maneuvers01/audit/audit.json), and
+[provenance manifest](runs/maneuvers01/experiment-manifest.json).
+
+```bash
+OMNI_KIT_ACCEPT_EULA=YES bash setup/run.sh airwm collect \
+  --output data/maneuvers01/flights --episodes 100 --seconds 45 \
+  --trajectory maneuvers --seed 302
+bash setup/run.sh python scripts/audit_flights.py \
+  --data data/maneuvers01/flights --output runs/maneuvers01/audit --expected-flights 100
+bash setup/run.sh airwm train --data data/maneuvers01/flights \
+  --run runs/maneuvers01/model --steps 10000 --workers 4
+bash setup/run.sh airwm evaluate --checkpoint runs/maneuvers01/model/best.pt \
+  --output runs/maneuvers01/evaluation --windows 100
+bash setup/run.sh airwm evaluate --checkpoint runs/baseline/best.pt \
+  --split-file runs/maneuvers01/model/split.json \
+  --output runs/maneuvers01/pilot-on-maneuvers --windows 100
+bash setup/run.sh airwm evaluate --checkpoint runs/maneuvers01/model/best.pt \
+  --split-file runs/baseline/split.json --output runs/maneuvers01/model-on-sweeps --windows 100
+OMNI_KIT_ACCEPT_EULA=YES bash setup/run.sh airwm collect \
+  --output data/maneuvers01/reference --episodes 8 --seconds 12 --seed 401
+OMNI_KIT_ACCEPT_EULA=YES bash setup/run.sh airwm branch-collect \
+  --source data/maneuvers01/reference --output data/maneuvers01/branches --sources 8 --seed 401
+bash setup/run.sh airwm branch-evaluate --data data/maneuvers01/branches \
+  --checkpoint runs/maneuvers01/model/best.pt --output runs/maneuvers01/new-branches-model
+bash setup/run.sh airwm branch-evaluate --data data/maneuvers01/branches \
+  --checkpoint runs/baseline/best.pt --output runs/maneuvers01/new-branches-pilot
+bash setup/run.sh python scripts/compare_action_models.py \
+  --baseline runs/maneuvers01/new-branches-pilot/metrics.json \
+  --candidate runs/maneuvers01/new-branches-model/metrics.json \
+  --output runs/maneuvers01/new-branches-comparison
+```
+
+Use fresh output directories when reproducing. The optional evaluation
+`--split-file` supports identical-flight comparisons and rejects overlap with
+the evaluated checkpoint's training flights. Both seed-101 and seed-401 branch
+banks have now been inspected; reserve another set of histories for the final
+evaluation of future tuned models. Motor-input normalization,
+multi-step prediction losses, stronger motion supervision, and training branches
+with shared histories remain separate follow-up experiments.
 
 ## Roadmap
 
@@ -209,7 +330,8 @@ Next, collect randomized maneuvers that excite the independent control axes, inv
 - [x] Collect and inspect the pilot flight dataset.
 - [x] Train and evaluate the RSSM prediction baseline.
 - [x] Implement paired simulator branches and evaluate changed-action predictions (current model fails this check).
-- [ ] Broaden maneuvers and improve action-response learning; retrain and test on new histories.
+- [x] Collect varied maneuvers, retrain with unchanged settings, and compare on new histories.
+- [ ] Improve action-response learning through separate normalization/objective experiments.
 - [ ] Run motion-head ablation and revisit evaluation.
 - [ ] Add learned exploration and compare it with scripted sweeps at equal flight time.
 - [ ] Add persistent spatial memory and evaluate revisits.
